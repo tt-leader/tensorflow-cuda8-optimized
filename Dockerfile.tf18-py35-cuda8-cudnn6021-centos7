@@ -1,0 +1,45 @@
+FROM nvidia/cuda:8.0-cudnn6-devel-centos7
+MAINTAINER Tong XU <tong.xu@outlook.com>
+
+# install some utils
+# install openssl-devel for pip install(from 3.5.2 source)
+RUN yum -y install wget make patch which unzip git openssl-devel
+
+# install python 3.5.2 from source
+WORKDIR /tmp
+RUN wget https://www.python.org/ftp/python/3.5.2/Python-3.5.2.tar.xz && tar xvf Python-3.5.2.tar.xz
+RUN cd Python-3.5.2 && ./configure && make -j$(nproc) && make install
+
+# install python-numpy and python-wheel
+RUN pip3 install numpy wheel
+
+# install bazel 0.10.0 from source
+RUN wget https://github.com/bazelbuild/bazel/releases/download/0.10.0/bazel-0.10.0-installer-linux-x86_64.sh 
+RUN sh bazel-0.10.0-installer-linux-x86_64.sh
+
+# clone tensorflow repo to home
+RUN cd /root && git clone --progress --verbose https://github.com/tensorflow/tensorflow && cd tensorflow && git checkout r1.8
+
+##################################### fix bugs and erros below ####################################
+
+#1 set LD_LIBRARY_PATH
+RUN export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64 
+RUN LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/extras/CUPTI/lib64 
+
+#2 fix the error of 'Cuda Configuration Error: Cannot find libdevice.10.bc under /usr/local/cuda-8.0'
+RUN cp /usr/local/cuda/nvvm/libdevice/libdevice.compute_50.10.bc /usr/local/cuda/nvvm/libdevice/libdevice.10.bc
+
+#3 fix bug of calling a __host__ function("__builtin_expect") from a __global__ function("tensorflow::ScatterNdOpKernel<double, int, ( ::tensorflow::scatter_nd_op::UpdateOp)2, (int)1> ") is not allowed
+RUN sed -i 's/__builtin_expect(x, 0)/x/g' /root/tensorflow/tensorflow/core/platform/macros.h
+RUN sed -i 's/__builtin_expect(!!(x), 1)/x/g' /root/tensorflow/tensorflow/core/platform/macros.h
+
+#4 fix the error of bazel-out/host/bin/_solib_local/_U_S_Stensorflow_Scc_Cops_Slookup_Uops_Ugen_Ucc___Utensorflow/libtensorflow_framework.so: undefined reference to `cuMemGetAddressRange_v2 (cuBalabalabala)'
+RUN echo "/usr/local/cuda-8.0/targets/x86_64-linux/lib/stubs" > /etc/ld.so.conf.d/cuda-8.0-stubs.conf && ldconfig
+
+##################################### build tensorflow below ####################################
+
+WORKDIR /root/tensorflow
+RUN /bin/echo -e "/usr/local/bin/python3\n\nY\nN\nN\nN\nN\nN\nN\nN\nN\nY\n8.0\n\n6.0\n\nN\n\n\nN\n\nN\n\nN\n" | ./configure
+# it will take about 60 minutes(@i7-6850K and 12 jobs) to build tensorflow depending on your system
+RUN bazel build --jobs $(nproc) --config=opt --config=cuda //tensorflow/tools/pip_package:build_pip_package --verbose_failures
+RUN bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow_pkg
